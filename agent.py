@@ -11,13 +11,8 @@ Phase 3: Low-Stock Dashboard, Individual Delivery Records (DO Log), Strict MOQ,
          Dynamic Admin Promotion ('GRANT'), Admin Access Withdrawal ('WITHDRAW'),
          Multiple Labs / Item Categories Support, Categorized R&D BOM Stock Catalog,
          and Integrated 'Categorization Guide' Sheet.
-
-Environment variables (PyCharm: Run > Edit Configurations > Environment variables,
-separate several with a semicolon):
-    GEMINI_API_KEY=...           (only needed for free-form sentences)
-    GMAIL_APP_PASSWORD=...       (16 characters, no spaces)
 """
-import os, re, json, smtplib, threading
+import os, re, json, smtplib, threading, subprocess
 from datetime import datetime
 from email.message import EmailMessage
 
@@ -38,6 +33,26 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "").replace(" ", "")
 
 lock = threading.Lock()  # only one write to Excel at a time
 app = Flask(__name__)
+
+# ==========================================
+# 1. AUTOMATICALLY LAUNCH NODE.JS BRIDGE
+# ==========================================
+def launch_node_bridge():
+    """
+    Spawns bridge.js as a background child process so both Python
+    and Node.js run inside a single host container.
+    """
+    try:
+        print("[Agent] Spawning Node.js WhatsApp bridge (bridge.js)...")
+        subprocess.Popen(["node", "bridge.js"])
+        print("[Agent] Node.js bridge launched successfully in background.")
+    except FileNotFoundError:
+        print("[Agent Error] 'node' executable not found in PATH. Ensure Node.js is installed in this container.")
+    except Exception as e:
+        print(f"[Agent Error] Failed to launch bridge.js: {e}")
+
+# Call the launcher before initializing workbooks and server
+launch_node_bridge()
 
 INV_HEADERS = ["Item", "Qty", "Unit", "MinQty", "MOQ", "Location", "Category", "Picture"]
 REQ_HEADERS = ["TicketID", "Time", "Requester", "Item", "QtyRequested", "Completed", "Pending", "Status", "Location", "Category", "Note"]
