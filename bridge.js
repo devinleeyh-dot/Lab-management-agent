@@ -59,7 +59,15 @@ if (process.env.PUPPETEER_EXECUTABLE_PATH) puppeteer.executablePath = process.en
 // Optional: fresh logins against the newest WhatsApp Web build can crash with "Execution context was
 // destroyed". Setting WA_WEB_VERSION (e.g. 2.3000.1052477439) pins a build; the matching <version>.html
 // must exist in WA_WEB_CACHE_DIR. Leave unset to use the live WhatsApp Web (default).
-const clientOptions = { authStrategy: new LocalAuth({ dataPath: AUTH_DIR }), puppeteer };
+const clientOptions = {
+  authStrategy: new LocalAuth({ dataPath: AUTH_DIR }),
+  puppeteer,
+  // The library's default identity is Chrome 101, which WhatsApp Web no longer fully loads for.
+  userAgent: process.env.WA_USER_AGENT || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36",
+  // First load on a small cloud machine can exceed the library's 30 s default.
+  authTimeoutMs: 180000,
+  webVersionCache: { type: "none" },
+};
 if (process.env.WA_WEB_VERSION) {
   clientOptions.webVersion = process.env.WA_WEB_VERSION;
   clientOptions.webVersionCache = {
