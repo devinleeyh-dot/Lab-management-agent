@@ -1,0 +1,11 @@
+# secrets and private data - never commit these
+.env
+*.xlsx
+.wwebjs_auth/
+.wwebjs_cache/
+data/
+
+node_modules/
+.venv/
+__pycache__/
+.idea/
