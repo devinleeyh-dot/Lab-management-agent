@@ -12,7 +12,7 @@
     "PORT": "5000",
     "PYTHONUNBUFFERED": "1"
   },
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-color-emoji && npm install && pip install --user -r requirements.txt && mkdir -p data",
+  "postCreateCommand": "sudo rm -f /etc/apt/sources.list.d/yarn.list && sudo apt-get update && sudo apt-get install -y --no-install-recommends chromium fonts-liberation fonts-noto-color-emoji && npm install && pip install --user -r requirements.txt && mkdir -p data",
   "forwardPorts": [5000],
   "portsAttributes": {
     "5000": { "label": "Lab Agent (admin page)", "onAutoForward": "notify" }
