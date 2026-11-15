@@ -12,13 +12,19 @@ Phase 3: Low-Stock Dashboard, Individual Delivery Records (DO Log), Strict MOQ,
          Multiple Labs / Item Categories Support, Categorized R&D BOM Stock Catalog,
          and Integrated 'Categorization Guide' Sheet.
 """
-import os, re, json, smtplib, threading, subprocess
+import os, re, json, smtplib, threading, subprocess, time, html, hmac
 from datetime import datetime
 from email.message import EmailMessage
 
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file, abort, Response
 from openpyxl import Workbook, load_workbook
+
+try:  # load a local .env file if present (on a cloud host, use its Variables page instead)
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 EXCEL_PATH = os.environ.get("LAB_EXCEL", "lab_inventory.xlsx")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -37,22 +43,31 @@ app = Flask(__name__)
 # ==========================================
 # 1. AUTOMATICALLY LAUNCH NODE.JS BRIDGE
 # ==========================================
+BRIDGE_STATE = {"qr": None, "status": "starting", "updated": None}
+
+
 def launch_node_bridge():
     """
-    Spawns bridge.js as a background child process so both Python
-    and Node.js run inside a single host container.
+    Runs bridge.js as a child process so Python and Node.js share one container,
+    and restarts it automatically if it ever crashes.
     """
-    try:
-        print("[Agent] Spawning Node.js WhatsApp bridge (bridge.js)...")
-        subprocess.Popen(["node", "bridge.js"])
-        print("[Agent] Node.js bridge launched successfully in background.")
-    except FileNotFoundError:
-        print("[Agent Error] 'node' executable not found in PATH. Ensure Node.js is installed in this container.")
-    except Exception as e:
-        print(f"[Agent Error] Failed to launch bridge.js: {e}")
+    def supervise():
+        here = os.path.dirname(os.path.abspath(__file__))
+        while True:
+            try:
+                print("[Agent] Starting Node.js WhatsApp bridge (bridge.js)...")
+                proc = subprocess.Popen(["node", os.path.join(here, "bridge.js")], cwd=here)
+                code = proc.wait()
+                print(f"[Agent] bridge.js exited with code {code}. Restarting in 10 s...")
+            except FileNotFoundError:
+                print("[Agent Error] 'node' not found in PATH. Install Node.js in this container.")
+                return
+            except Exception as e:
+                print(f"[Agent Error] bridge.js failed: {e}. Retrying in 10 s...")
+            BRIDGE_STATE.update(status="restarting", qr=None)
+            time.sleep(10)
 
-# Call the launcher before initializing workbooks and server
-launch_node_bridge()
+    threading.Thread(target=supervise, daemon=True).start()
 
 INV_HEADERS = ["Item", "Qty", "Unit", "MinQty", "MOQ", "Location", "Category", "Picture"]
 REQ_HEADERS = ["TicketID", "Time", "Requester", "Item", "QtyRequested", "Completed", "Pending", "Status", "Location", "Category", "Note"]
@@ -1041,8 +1056,101 @@ def unknown():
 # ==========================================
 # 3. APPLICATION ENTRY POINT (CLOUD READY)
 # ==========================================
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
+INTERNAL_PATHS = ("/incoming", "/users", "/unknown", "/bridge-state")
+
+
+@app.before_request
+def guard_internal_endpoints():
+    """Only bridge.js (same container) may call the internal endpoints.
+    Requests coming through the host's public URL arrive from a proxy, not 127.0.0.1."""
+    if request.path in INTERNAL_PATHS:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded or request.remote_addr not in ("127.0.0.1", "::1"):
+            abort(403)
+
+
+def require_admin():
+    key = request.args.get("key") or request.form.get("key") or ""
+    if not ADMIN_KEY:
+        abort(Response("ADMIN_KEY is not set on the server. Add it in the host's Variables.", 503))
+    if not hmac.compare_digest(key, ADMIN_KEY):
+        abort(403)
+    return key
+
+
+@app.route("/")
+def health():
+    return jsonify({"ok": True, "service": "lab-agent", "whatsapp": BRIDGE_STATE["status"]})
+
+
+@app.route("/bridge-state", methods=["POST"])
+def bridge_state():
+    d = request.get_json(force=True) or {}
+    BRIDGE_STATE.update(status=str(d.get("status") or "unknown"), qr=d.get("qr"),
+                        updated=f"{datetime.now():%Y-%m-%d %H:%M:%S}")
+    return jsonify({"ok": True})
+
+
+PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lab Agent Admin</title><style>body{{font-family:system-ui,sans-serif;max-width:640px;margin:24px auto;padding:0 16px;line-height:1.5}}
+.box{{border:1px solid #ccc;border-radius:8px;padding:16px;margin:16px 0}} #qr{{background:#fff;padding:12px;display:inline-block}}</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script></head><body>
+<h1>Lab Agent</h1>
+<div class="box"><h2>WhatsApp</h2><p>Status: <b>{status}</b> <small>({updated})</small></p>{qr_block}</div>
+<div class="box"><h2>Excel database</h2>
+<p><a href="/excel?key={key}">Download lab_inventory.xlsx</a></p>
+<form method="post" action="/excel" enctype="multipart/form-data">
+<input type="hidden" name="key" value="{key}"><input type="file" name="file" accept=".xlsx" required>
+<button>Upload &amp; replace</button></form>
+<p><small>Edit Vendors / Requesters / Inventory in Excel, then upload it here. Uploading replaces the server copy.</small></p></div>
+</body></html>"""
+
+
+@app.route("/admin")
+def admin_page():
+    key = require_admin()
+    qr = BRIDGE_STATE["qr"]
+    if qr:
+        qr_block = ("<p>Scan with WhatsApp &gt; Linked devices &gt; Link a device. The page refreshes every 20 s.</p>"
+                    "<div id='qr'></div><script>new QRCode(document.getElementById('qr'),{text:%s,width:280,height:280});"
+                    "setTimeout(()=>location.reload(),20000)</script>" % json.dumps(qr))
+    elif BRIDGE_STATE["status"] == "ready":
+        qr_block = "<p>Linked and running. No QR needed.</p>"
+    else:
+        qr_block = "<p>Waiting for the bridge... (page refreshes)</p><script>setTimeout(()=>location.reload(),5000)</script>"
+    return PAGE.format(status=html.escape(BRIDGE_STATE["status"]), updated=html.escape(str(BRIDGE_STATE["updated"])),
+                       qr_block=qr_block, key=html.escape(key))
+
+
+@app.route("/excel", methods=["GET", "POST"])
+def excel_file():
+    key = require_admin()
+    if request.method == "GET":
+        with lock:
+            return send_file(os.path.abspath(EXCEL_PATH), as_attachment=True, download_name="lab_inventory.xlsx")
+    f = request.files.get("file")
+    if not f or not f.filename.lower().endswith(".xlsx"):
+        return "Please choose an .xlsx file.", 400
+    tmp = EXCEL_PATH[:-5] + ".upload.xlsx" if EXCEL_PATH.lower().endswith(".xlsx") else EXCEL_PATH + ".upload.xlsx"
+    f.save(tmp)
+    try:
+        load_workbook(tmp).close()  # make sure it is a valid workbook
+    except Exception as e:
+        os.remove(tmp)
+        return f"That file is not a valid Excel workbook: {html.escape(str(e))}", 400
+    with lock:
+        os.replace(tmp, EXCEL_PATH)
+    init_workbook()  # add any missing sheets
+    return f"Uploaded. <a href='/admin?key={html.escape(key)}'>Back</a>"
+
+
 if __name__ == "__main__":
+    folder = os.path.dirname(os.path.abspath(EXCEL_PATH))
+    os.makedirs(folder, exist_ok=True)
     init_workbook()
+    if os.environ.get("START_BRIDGE", "1") == "1":
+        launch_node_bridge()
     port = int(os.environ.get("PORT", 5000))
     print(f"[Agent] Starting Flask server on port {port}...")
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
